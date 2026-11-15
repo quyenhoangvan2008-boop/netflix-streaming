@@ -11,6 +11,7 @@ import threading
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor
 import requests
+from requests.adapters import HTTPAdapter
 
 TMDB_IMG_POSTER = "https://image.tmdb.org/t/p/w342"
 TMDB_IMG_BACKDROP = "https://image.tmdb.org/t/p/w780"
@@ -63,6 +64,9 @@ class TMDBClient:
         self._lock = threading.Lock()
         self._cache: Dict[str, Dict] = {}
         self._dirty = False
+        self._session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=24, pool_maxsize=24)
+        self._session.mount("https://", adapter)
 
         if cache_path and os.path.exists(cache_path):
             try:
@@ -97,7 +101,7 @@ class TMDBClient:
             p["api_key"] = self.api_key
         url = f"https://api.themoviedb.org/3{path}"
         try:
-            resp = requests.get(url, headers=self._headers(), params=p, timeout=8)
+            resp = self._session.get(url, headers=self._headers(), params=p, timeout=2.8)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:
@@ -195,7 +199,7 @@ class TMDBClient:
             self._dirty = True
         return parsed
 
-    def prefetch_movies(self, items: List[Dict], max_workers: int = 8) -> Dict[int, Dict]:
+    def prefetch_movies(self, items: List[Dict], max_workers: int = 12) -> Dict[int, Dict]:
         """Batch fetches TMDB metadata + posters + YouTube trailer links concurrently."""
         if not self.is_configured or not items:
             return {int(it["movie_id"]): self._cache.get(str(it["movie_id"]), {}) for it in items}

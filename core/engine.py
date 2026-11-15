@@ -44,28 +44,28 @@ MODEL_CATALOG = [
 
 # Bilingual Vietnamese <-> English cinema mood & genre bridge for accurate local retrieval
 VN_MOOD_BRIDGE = {
-    "buồn": ("drama tragic emotional tearjerker melancholy poignant heartbreaking sad grief loss", ["Drama"]),
-    "sâu lắng": ("drama poignant quiet thoughtful introspective life human relationship moving", ["Drama"]),
-    "nhẹ nhàng": ("gentle warm heartwarming slice of life comedy romance touching calm", ["Drama", "Romance", "Comedy"]),
-    "ý nghĩa": ("meaningful inspiring philosophical life drama masterpiece academy award", ["Drama"]),
-    "cảm động": ("touching emotional heartfelt moving tears family love", ["Drama", "Romance"]),
-    "tâm lý": ("psychological drama character study suspense mind", ["Drama", "Thriller"]),
-    "lãng mạn": ("romance love couple relationship romantic passion", ["Romance"]),
-    "tình cảm": ("romance drama love relationship emotional", ["Romance", "Drama"]),
-    "hành động": ("action hero chase fight explosion martial arts", ["Action"]),
-    "viễn tưởng": ("sci-fi futuristic space alien time travel cyber technology", ["Sci-Fi"]),
-    "hack não": ("mind-bending twist mystery surreal dream sci-fi psychological", ["Sci-Fi", "Mystery", "Thriller"]),
-    "kinh dị": ("horror scary ghost killer haunted terror nightmare", ["Horror"]),
-    "hài": ("comedy funny hilarious humor laugh satire parody", ["Comedy"]),
-    "hoạt hình": ("animation animated pixar disney family cartoon", ["Animation", "Children's"]),
-    "gia đình": ("family children kids heartwarming adventure", ["Children's", "Animation", "Comedy"]),
+    "buồn": ("tragic heartbreaking tearjerker melancholy grief sorrow poignant emotional drama", ["Drama"]),
+    "sâu lắng": ("poignant thoughtful introspective touching bittersweet soulful intimate cinema drama", ["Drama"]),
+    "nhẹ nhàng": ("gentle heartwarming tender warm touching quiet calm uplifting romance drama", ["Drama", "Romance"]),
+    "ý nghĩa": ("inspiring profound humanitarian classic masterpiece academy award moving friendship hope", ["Drama"]),
+    "cảm động": ("touching heartfelt emotional moving tears compassion love devotion", ["Drama", "Romance"]),
+    "tâm lý": ("psychological character study suspense moral dilemma mind drama", ["Drama", "Thriller"]),
+    "lãng mạn": ("romance love couple relationship passionate longing", ["Romance"]),
+    "tình cảm": ("romance drama love relationship emotional tender", ["Romance", "Drama"]),
+    "hành động": ("action hero chase fight explosion martial arts rescue", ["Action"]),
+    "viễn tưởng": ("sci-fi futuristic space alien time travel dystopia cyber technology", ["Sci-Fi"]),
+    "hack não": ("mind-bending twist mystery surreal dream sci-fi psychological labyrinth", ["Sci-Fi", "Mystery", "Thriller"]),
+    "kinh dị": ("horror scary ghost killer haunted terror nightmare supernatural", ["Horror"]),
+    "hài": ("comedy funny hilarious humor laugh satire witty", ["Comedy"]),
+    "hoạt hình": ("animation animated pixar disney cartoon", ["Animation", "Children's"]),
+    "gia đình": ("family children kids heartwarming wholesome adventure", ["Children's", "Animation", "Comedy"]),
     "hình sự": ("crime detective mafia heist murder investigation", ["Crime", "Thriller"]),
     "trinh thám": ("mystery detective investigation clue suspense", ["Mystery", "Crime"]),
-    "chiến tranh": ("war soldier military battle history wwii vietnam", ["War", "Drama"]),
+    "chiến tranh": ("war soldier military battle history wwii", ["War", "Drama"]),
     "phiêu lưu": ("adventure journey quest expedition fantasy", ["Adventure", "Fantasy"]),
     "cuốn hút": ("gripping captivating riveting thrilling intense engaging compelling masterpiece", ["Thriller", "Drama", "Sci-Fi", "Action"]),
     "kịch tính": ("dramatic suspenseful intense tension gripping plot twist thriller", ["Thriller", "Drama", "Crime"]),
-    "gay cấn": ("thrilling intense suspenseful edge of seat action chase thriller", ["Thriller", "Action", "Crime"]),
+    "gay cấn": ("thrilling intense suspenseful action chase thriller", ["Thriller", "Action", "Crime"]),
     "hồi hộp": ("suspenseful tense mystery thriller gripping twist", ["Thriller", "Mystery"]),
     "hấp dẫn": ("engaging exciting fascinating entertaining blockbuster thriller adventure", ["Action", "Adventure", "Thriller"]),
     "kinh điển": ("classic masterpiece acclaim iconic top rated cinema", ["Drama", "Crime", "Sci-Fi"]),
@@ -85,6 +85,35 @@ ONBOARDING_SHOWCASE_IDS: List[int] = [
     1214,  # Alien (Action|Horror|Sci-Fi|Thriller)
     2396,  # Shakespeare in Love (Comedy|Romance)
 ]
+
+GENRE_VI_MAP: Dict[str, str] = {
+    "Action": "Hành động",
+    "Adventure": "Phiêu lưu",
+    "Animation": "Hoạt hình",
+    "Children's": "Gia đình & Thiếu nhi",
+    "Comedy": "Hài",
+    "Crime": "Hình sự",
+    "Documentary": "Tài liệu",
+    "Drama": "Chính kịch",
+    "Fantasy": "Giả tưởng",
+    "Film-Noir": "Phim Noir",
+    "Horror": "Kinh dị",
+    "Musical": "Nhạc kịch",
+    "Mystery": "Bí ẩn",
+    "Romance": "Lãng mạn",
+    "Sci-Fi": "Khoa học viễn tưởng",
+    "Thriller": "Giật gân",
+    "War": "Chiến tranh",
+    "Western": "Viễn Tây",
+}
+
+
+def translate_genre_vi(genre: str) -> str:
+    return GENRE_VI_MAP.get(str(genre), str(genre))
+
+
+def translate_genres_vi(genres: List[str]) -> str:
+    return ", ".join(translate_genre_vi(g) for g in genres if g)
 
 
 def _cosine_genre_ild(item_ids: List[int], genre_matrix: np.ndarray) -> float:
@@ -194,15 +223,31 @@ class RecSysEngine:
         self._search_mids = sorted(self.metadata.keys())
         corpus = []
         self._clean_titles = {}
-        for mid in self._search_mids:
+        self._genres_arr = []
+        self._quality_prior_arr = np.zeros(len(self._search_mids), dtype=np.float32)
+
+        for idx, mid in enumerate(self._search_mids):
             m = self.metadata[mid]
             disp = m["display_title"]
             no_yr = re.sub(r"\s*\(\d{4}\)\s*$", "", disp).lower().strip()
             self._clean_titles[mid] = no_yr
+            self._genres_arr.append(frozenset(m["genres"]))
+
+            votes = float(m.get("popularity_count", 0))
+            rating = float(m.get("ml_avg_rating", 0.0))
+            # Bayesian acclaimed prior: rewards well-rated, widely loved films; penalizes weak < 3.4 fillers
+            bayes_r = (votes * rating + 80.0 * 3.3) / (votes + 80.0)
+            pop_part = 0.045 * np.log1p(votes)
+            qual_part = 0.28 * (bayes_r - 3.3)
+            self._quality_prior_arr[idx] = pop_part + qual_part
+
             doc = f"{disp} {m['title']} {' '.join(m['genres'])} {m.get('director', '')} {m.get('description', '')}"
             corpus.append(doc)
+
         self._tfidf = TfidfVectorizer(stop_words="english", max_features=12000, ngram_range=(1, 2))
         self._tfidf_mat = self._tfidf.fit_transform(corpus)
+        self._search_cache: Dict[Tuple, Dict] = {}
+        self._popular_dropdown_ids: List[int] = [int(m) for m in self.popular_movie_ids]
 
     # ------------------------------------------------------------------
     # Scoring Helper -> Returns ordered (movie_id, score) pairs cleanly
@@ -571,55 +616,81 @@ class RecSysEngine:
             return {"mode": "empty", "assistant_reply": "Hãy nhập tên phim hoặc tâm trạng/thể loại bạn muốn xem!", "items": []}
 
         q_low = q.lower()
+        cache_k = (q_low, int(top_n), bool(gemini_keys))
+        if cache_k in self._search_cache:
+            return self._search_cache[cache_k]
+
         t0 = time.perf_counter()
 
-        # Check Vietnamese mood triggers & expand query
+        # Check Vietnamese mood triggers & expand query with genre vote weights
         expanded_terms = [q_low]
-        boost_genres: Set[str] = set()
+        genre_weights: Dict[str, float] = {}
         matched_vn_moods = []
         for vn_kw, (en_exp, genres) in VN_MOOD_BRIDGE.items():
             if vn_kw in q_low:
                 expanded_terms.append(en_exp)
-                boost_genres.update(genres)
+                for g in genres:
+                    genre_weights[g] = genre_weights.get(g, 0.0) + 1.0
                 matched_vn_moods.append(vn_kw)
 
-        # Title similarity pass across all 3,883 movies
+        # Fast vectorized-style title match (avoids slow 3,883x difflib loop)
         title_scores = np.zeros(len(self._search_mids), dtype=np.float32)
+        sub_hits = 0
         max_exact_score = 0.0
         for idx, mid in enumerate(self._search_mids):
             t_clean = self._clean_titles[mid]
             if q_low == t_clean:
                 s = 1.0
+                sub_hits += 1
             elif q_low in t_clean:
-                s = 0.85 + 0.1 * (len(q_low) / max(1, len(t_clean)))
+                s = 0.86 + 0.12 * (len(q_low) / max(1, len(t_clean)))
+                sub_hits += 1
             else:
-                s = difflib.SequenceMatcher(None, q_low, t_clean).ratio() * 0.65
+                s = 0.0
             title_scores[idx] = s
             if s > max_exact_score:
                 max_exact_score = s
+
+        # Only run fuzzy matching when substring search yields very few hits & not a VN mood query
+        if sub_hits < 5 and len(q_low) >= 3 and not matched_vn_moods:
+            for idx, mid in enumerate(self._search_mids):
+                if title_scores[idx] == 0.0:
+                    r = difflib.SequenceMatcher(None, q_low, self._clean_titles[mid]).ratio()
+                    if r >= 0.55:
+                        title_scores[idx] = r * 0.65
+                        if title_scores[idx] > max_exact_score:
+                            max_exact_score = title_scores[idx]
 
         # TF-IDF semantic match over enriched overview + genres + director
         q_vec = self._tfidf.transform([" ".join(expanded_terms)])
         sem_scores = cosine_similarity(q_vec, self._tfidf_mat).ravel()
 
-        # Genre boost + popularity/quality prior so classics surface cleanly for mood queries
+        # Weighted genre alignment & family/horror guard for emotional adult prompts
         genre_bonus = np.zeros(len(self._search_mids), dtype=np.float32)
-        pop_prior = np.zeros(len(self._search_mids), dtype=np.float32)
-        for idx, mid in enumerate(self._search_mids):
-            m = self.metadata[mid]
-            if boost_genres and any(g in boost_genres for g in m["genres"]):
-                genre_bonus[idx] = 0.28
-            pop_prior[idx] = min(0.22, 0.03 * np.log1p(m["popularity_count"])) + 0.025 * max(0.0, m["ml_avg_rating"] - 3.0)
+        wants_kids = any(g in genre_weights for g in ("Animation", "Children's"))
+        wants_horror = "Horror" in genre_weights
+        max_gw = max(1.0, max(genre_weights.values())) if genre_weights else 1.0
+        for idx in range(len(self._search_mids)):
+            gs = self._genres_arr[idx]
+            if genre_weights:
+                matched_w = sum(genre_weights[g] for g in gs if g in genre_weights)
+                if matched_w > 0:
+                    genre_bonus[idx] = 0.34 * (matched_w / max_gw)
+                if not wants_kids and ("Animation" in gs or "Children's" in gs):
+                    genre_bonus[idx] -= 0.45
+                if not wants_horror and "Horror" in gs:
+                    genre_bonus[idx] -= 0.35
 
         is_title_search = (max_exact_score >= 0.72) and not matched_vn_moods
         intent_mode = "title_search" if is_title_search else "mood_recommend"
 
         if is_title_search:
-            total = 2.0 * title_scores + 0.45 * sem_scores + 0.15 * pop_prior
+            total = 2.4 * title_scores + 0.35 * sem_scores + 0.35 * self._quality_prior_arr
         else:
-            total = 0.35 * title_scores + 1.25 * sem_scores + genre_bonus + 0.55 * pop_prior
+            total = 0.25 * title_scores + 1.15 * sem_scores + genre_bonus + 1.15 * self._quality_prior_arr
 
-        top_pool_idx = np.argpartition(-total, 25)[:25]
+        pool_k = 32
+        top_pool_idx = np.argpartition(-total, pool_k)[:pool_k]
         top_pool_idx = top_pool_idx[np.argsort(-total[top_pool_idx])]
         pool_items = []
         for idx in top_pool_idx:
@@ -628,8 +699,8 @@ class RecSysEngine:
             m["match_score"] = round(float(total[idx]), 4)
             pool_items.append(m)
 
-        # If Gemini keys are configured (especially for mood discovery or nuanced search), curate with Gemini 3.5 Flash-Lite
-        if gemini_keys and (not is_title_search or max_exact_score < 0.90):
+        # Use Gemini 3.5 Flash-Lite curation for mood/semantic queries (fast cacheable)
+        if gemini_keys and (not is_title_search or max_exact_score < 0.85):
             try:
                 res = agent_curate_movies(
                     api_keys=gemini_keys,
@@ -645,13 +716,15 @@ class RecSysEngine:
                     m["rank"] = rank
                     m["why_match"] = p["reason"]
                     items_out.append(m)
-                return {
+                out = {
                     "mode": "gemini_agent",
                     "intent_mode": intent_mode,
                     "assistant_reply": res["assistant_reply"],
                     "items": items_out,
                     "latency_ms": res["latency_ms"],
                 }
+                self._search_cache[cache_k] = out
+                return out
             except Exception:
                 pass
 
@@ -660,25 +733,30 @@ class RecSysEngine:
         for rank, it in enumerate(pool_items[:top_n], 1):
             it_copy = dict(it)
             it_copy["rank"] = rank
+            genres_vi = translate_genres_vi(it["genres"])
             if is_title_search:
-                it_copy["why_match"] = f"Khớp trực tiếp tên phim • Thể loại: {', '.join(it['genres'])} • Rating ML ★{it['ml_avg_rating']}"
+                it_copy["why_match"] = f"Thể loại: {genres_vi} • ★{it['ml_avg_rating']}"
             else:
-                it_copy["why_match"] = f"Phù hợp chủ đề ({', '.join(it['genres'])}) • ★{it['ml_avg_rating']} ({it['popularity_count']} đánh giá)"
+                it_copy["why_match"] = f"{genres_vi} • ★{it['ml_avg_rating']} ({it['popularity_count']} đánh giá)"
             items_out.append(it_copy)
 
         if is_title_search:
-            reply = f"Tìm thấy **{len(items_out)}** phim khớp nhất với từ khóa **\"{q}\"** trong kho MovieLens-1M:"
+            reply = f"Tìm thấy {len(items_out)} phim khớp nhất với \"{q}\":"
         else:
             mood_note = f" ({', '.join(matched_vn_moods)})" if matched_vn_moods else ""
-            reply = f"Dựa trên yêu cầu tâm trạng/thể loại{mood_note}, đây là **{len(items_out)}** gợi ý phù hợp nhất dành cho bạn:"
+            reply = f"Gợi ý phim phù hợp theo tâm trạng{mood_note} dành cho bạn:"
 
-        return {
+        out = {
             "mode": "local_hybrid_search",
             "intent_mode": intent_mode,
             "assistant_reply": reply,
             "items": items_out,
             "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1),
         }
+        if len(self._search_cache) > 64:
+            self._search_cache.clear()
+        self._search_cache[cache_k] = out
+        return out
 
     # ------------------------------------------------------------------
     # 4. Streamlined Cookie + Real-Time Watch Page (LightGCN -> Fast LLM)
@@ -690,6 +768,32 @@ class RecSysEngine:
                 items.append(dict(self.metadata[mid]))
         return items
 
+    def search_titles_live(self, query: str, limit: int = 9) -> List[Dict]:
+        """Instant live title filter for the onboarding movie picker."""
+        q = (query or "").strip().lower()
+        if not q:
+            return self.get_onboarding_showcase()[:limit]
+
+        scored = []
+        for mid in self._search_mids:
+            m = self.metadata[mid]
+            disp_low = m["display_title"].lower()
+            clean_low = self._clean_titles[mid]
+            if clean_low.startswith(q) or disp_low.startswith(q):
+                tier = 3.0
+            elif q in disp_low:
+                tier = 2.0
+            else:
+                ratio = difflib.SequenceMatcher(None, q, clean_low).ratio()
+                if ratio < 0.45:
+                    continue
+                tier = ratio
+            pop_score = float(np.log1p(m.get("popularity_count", 0)))
+            scored.append((tier, pop_score, mid))
+
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [dict(self.metadata[mid]) for _, _, mid in scored[:limit]]
+
     def recommend_realtime_stream(
         self,
         watched_movie_ids: List[int],
@@ -697,14 +801,15 @@ class RecSysEngine:
         current_movie_id: Optional[int] = None,
         gemini_keys: Optional[List[str]] = None,
         top_k: int = 12,
+        use_llm: bool = True,
     ) -> Dict:
         """
         Real-time recommender for Home & Watch views:
         - Cold-start (no watched, no genres, no current movie) -> Popularity
-        - Genre-only cold-start -> Genre match weighted by Popularity + fast LLM rerank
+        - Genre-only cold-start -> Genre match weighted by Popularity (+ optional LLM rerank)
         - Active / Returning user (history or currently watching) -> Pretrained LightGCN
-          inductive graph propagation (zero retraining) + fast-timeout Gemini 3.5 Flash-Lite
-          rerank (cleanly skips back to LightGCN if Gemini is slow or unavailable).
+          inductive graph propagation (zero retraining) + optional fast Gemini 3.5 Flash-Lite
+          rerank (cleanly skips back to LightGCN if disabled, slow, or unavailable).
         """
         t0 = time.perf_counter()
         genres = [str(g) for g in (preferred_genres or []) if g in self.genre_to_idx]
@@ -719,7 +824,7 @@ class RecSysEngine:
             int(current_movie_id) if current_movie_id else None,
             tuple(sorted(genres)),
             int(top_k),
-            bool(gemini_keys),
+            bool(use_llm and gemini_keys),
         )
         if cache_key in self._rt_cache:
             return self._rt_cache[cache_key]
@@ -797,7 +902,7 @@ class RecSysEngine:
         engine_label = stage1_name
         reranked = False
 
-        if gemini_keys and len(s1_pairs) >= top_k:
+        if use_llm and gemini_keys and len(s1_pairs) >= top_k:
             cand_items = []
             for mid, sc in s1_pairs:
                 m = dict(self.metadata.get(mid, {"movie_id": mid, "display_title": f"Movie {mid}", "categories": []}))
@@ -821,8 +926,8 @@ class RecSysEngine:
                     retriever_name=stage1_name,
                     top_n=top_k,
                     alpha_fuse=0.30,
-                    timeout_ms=3200,
-                    max_wall_seconds=3.8,
+                    timeout_ms=12000,
+                    max_wall_seconds=5.5,
                 )
                 sc_map = dict(s1_pairs)
                 ranked_pairs = [(mid, sc_map.get(mid, 0.0)) for mid in res["ranked_ids"]]

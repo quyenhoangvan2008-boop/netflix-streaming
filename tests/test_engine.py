@@ -14,7 +14,7 @@ import unittest
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
-from core.engine import RecSysEngine
+from core.engine import RecSysEngine, translate_genres_vi
 from core.tmdb_client import TMDBClient
 from core.profile_store import build_cookie_sync_html, load_user_profile, save_user_profile, reset_user_profile
 
@@ -52,15 +52,21 @@ class TestNetflixRecSys(unittest.TestCase):
         self.assertEqual(r_title["intent_mode"], "title_search")
         self.assertTrue(any("Toy Story" in it["display_title"] for it in r_title["items"]))
 
-        # Vietnamese mood mode
+        # Vietnamese mood mode (anti-false-positive check for Children's / low-rated "Life" titles)
         r_mood = self.engine.hybrid_search_agent(
-            "hôm nay tôi muốn xem phim thể loại buồn, nhẹ nhàng, sâu lắng, ý nghĩa",
+            "hôm nay tôi buồn, tôi muốn xem phim nhẹ nhàng sâu lắng, có ý nghĩa",
             gemini_keys=None,
-            top_n=6,
+            top_n=8,
         )
         self.assertEqual(r_mood["intent_mode"], "mood_recommend")
-        self.assertEqual(len(r_mood["items"]), 6)
+        self.assertEqual(len(r_mood["items"]), 8)
         self.assertTrue(any("Drama" in it["genres"] for it in r_mood["items"]))
+        for it in r_mood["items"]:
+            self.assertGreaterEqual(it["ml_avg_rating"], 3.2, f"Low-rated title leaked: {it['display_title']}")
+            self.assertNotIn("Children's", it["genres"], f"Children's title leaked: {it['display_title']}")
+            self.assertNotIn("Animation", it["genres"], f"Animation title leaked: {it['display_title']}")
+
+        self.assertEqual(translate_genres_vi(["Action", "Sci-Fi"]), "Hành động, Khoa học viễn tưởng")
 
     def test_tmdb_youtube_trailer_if_configured(self):
         secrets_file = os.path.join(BASE_DIR, ".streamlit", "secrets.toml")
@@ -89,8 +95,9 @@ class TestNetflixRecSys(unittest.TestCase):
         self.assertEqual(len(r_genre["items"]), 10)
 
         # 3. Watching a movie (The Matrix = 2571) shifts LightGCN recommendations dynamically
-        r_watch_1 = self.engine.recommend_realtime_stream([1], current_movie_id=2571, gemini_keys=None, top_k=10)
+        r_watch_1 = self.engine.recommend_realtime_stream([1], current_movie_id=2571, gemini_keys=None, top_k=10, use_llm=False)
         self.assertEqual(r_watch_1["engine"], "LightGCN")
+        self.assertLess(r_watch_1["latency_ms"], 100.0)
         ids_matrix = [it["movie_id"] for it in r_watch_1["items"]]
         self.assertNotIn(2571, ids_matrix)
         self.assertNotIn(1, ids_matrix)

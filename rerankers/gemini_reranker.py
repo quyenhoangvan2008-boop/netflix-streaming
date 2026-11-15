@@ -6,6 +6,7 @@ with multi-key round-robin rotation and calibrated Stage-1 score fusion.
 import json
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Dict, List, Optional, Set, Tuple
 import numpy as np
 
@@ -36,9 +37,9 @@ def _call_gemini_json(
     api_keys: List[str],
     prompt: str,
     temperature: float = 0.15,
-    timeout_ms: int = 4000,
-    max_attempts: int = 3,
-    max_wall_seconds: float = 5.0,
+    timeout_ms: int = 12000,
+    max_attempts: int = 2,
+    max_wall_seconds: float = 4.5,
 ) -> Tuple[Dict, int]:
     from google import genai
     from google.genai import types
@@ -47,20 +48,26 @@ def _call_gemini_json(
     if rotator.count == 0:
         raise ValueError("Chưa cấu hình Gemini API Key.")
 
+    # Google Gemini API enforces a minimum 10s server-side deadline (>= 10000 ms).
+    # We keep the HTTP deadline >= 10000 ms and enforce fast wall-clock skip via Future timeout.
+    safe_http_ms = max(10000, int(timeout_ms))
     last_err = None
     attempt = 0
     attempts = max(1, min(max_attempts, rotator.count * 2))
     deadline = time.perf_counter() + max_wall_seconds
     for attempt in range(attempts):
-        if time.perf_counter() >= deadline:
+        rem = deadline - time.perf_counter()
+        if rem <= 0.4:
             break
         key = rotator.next_key()
         try:
             client = genai.Client(
                 api_key=key,
-                http_options=types.HttpOptions(timeout=timeout_ms),
+                http_options=types.HttpOptions(timeout=safe_http_ms),
             )
-            resp = client.models.generate_content(
+            pool = ThreadPoolExecutor(max_workers=1)
+            fut = pool.submit(
+                client.models.generate_content,
                 model=GEMINI_MODEL_NAME,
                 contents=prompt,
                 config={
@@ -68,6 +75,14 @@ def _call_gemini_json(
                     "temperature": temperature,
                 },
             )
+            try:
+                resp = fut.result(timeout=rem)
+            except FuturesTimeoutError as te:
+                fut.cancel()
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise TimeoutError(f"Gemini exceeded {max_wall_seconds:.1f}s wall limit") from te
+            pool.shutdown(wait=False)
+
             raw = (resp.text or "").strip()
             if not raw:
                 raise ValueError("Empty response from Gemini")
@@ -75,9 +90,9 @@ def _call_gemini_json(
             return parsed, attempt + 1
         except Exception as exc:
             last_err = exc
-            if time.perf_counter() + 0.3 >= deadline:
+            if isinstance(exc, TimeoutError) or (deadline - time.perf_counter()) < 0.5:
                 break
-            time.sleep(0.25)
+            time.sleep(0.2)
     raise RuntimeError(f"Gemini API error/timeout after {attempt + 1} attempt(s): {last_err}")
 
 
@@ -92,8 +107,8 @@ def build_rerank_prompt(
     for rank, it in enumerate(cand_items, 1):
         cats = "|".join(it.get("categories", [])[:3])
         desc = str(it.get("description", "")).strip()
-        if len(desc) > 160:
-            desc = desc[:160].rsplit(" ", 1)[0] + "..."
+        if len(desc) > 90:
+            desc = desc[:90].rsplit(" ", 1)[0] + "..."
         cand_lines.append(f"#{rank} (ID={it['movie_id']}, score={it.get('score', 0.0):.2f}) {it.get('display_title', it.get('title'))} [{cats}] - {desc}")
 
     return (
@@ -205,33 +220,33 @@ def agent_curate_movies(
         valid_ids.add(mid)
         cats = "|".join(c.get("categories", [])[:3])
         desc = str(c.get("description", "")).strip()
-        if len(desc) > 180:
-            desc = desc[:180].rsplit(" ", 1)[0] + "..."
+        if len(desc) > 110:
+            desc = desc[:110].rsplit(" ", 1)[0] + "..."
         cand_lines.append(
             f"ID={mid} | {c.get('display_title', c.get('title'))} [{cats}] "
             f"(ML ★{c.get('ml_avg_rating', 0):.1f}, {c.get('popularity_count', 0)} votes) — {desc}"
         )
 
     prompt = (
-        "You are a warm, knowledgeable bilingual (Vietnamese & English) Netflix Movie Discovery Agent.\n"
+        "You are a warm, knowledgeable Vietnamese & English Movie Discovery Agent.\n"
         f"User query ({intent_mode} mode): \"{user_query}\"\n\n"
-        "From the MovieLens-1M candidate pool below (already pre-filtered for relevance), select the best matching movies "
-        f"(up to {top_n} movies) and explain concisely WHY each film fits the user's request.\n\n"
+        "From the MovieLens-1M candidate pool below, select ONLY the strongest, highest-quality matching movies "
+        f"(up to {top_n} movies) — avoid low-rated mismatches — and write 1 crisp Vietnamese sentence explaining WHY each film fits.\n\n"
         "[MOVIELENS CANDIDATES]\n"
         + "\n".join(cand_lines)
         + "\n\nReturn ONLY valid JSON with exact schema:\n"
-        '{"assistant_reply": "<friendly natural response in the same language as the user query>", '
-        '"picks": [{"movie_id": <int ID from pool>, "reason": "<1 crisp sentence explaining why it fits>"}]}'
+        '{"assistant_reply": "<friendly natural response in Vietnamese without markdown ** asterisks>", '
+        '"picks": [{"movie_id": <int ID from pool>, "reason": "<1 crisp Vietnamese sentence explaining why it fits>"}]}'
     )
 
     t0 = time.perf_counter()
     data, _ = _call_gemini_json(
         api_keys,
         prompt,
-        temperature=0.25,
-        timeout_ms=5000,
+        temperature=0.2,
+        timeout_ms=12000,
         max_attempts=2,
-        max_wall_seconds=6.0,
+        max_wall_seconds=7.5,
     )
     latency_ms = (time.perf_counter() - t0) * 1000.0
 
