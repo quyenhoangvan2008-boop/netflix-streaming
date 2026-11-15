@@ -1,0 +1,136 @@
+{
+  "input": {
+    "source_name": "movielens_processed.zip",
+    "source_sha256": "e76c46d5e23c693d9db9830221640efadc8d81a986679e8b945cea2693e6adb6",
+    "rows": 1000209,
+    "rated_users": 6040,
+    "rated_movies": 3706,
+    "metadata_users": 6040,
+    "metadata_movies": 3883,
+    "duplicate_user_item_pairs": 0,
+    "unknown_foreign_keys": 0,
+    "rating_min": 1,
+    "rating_max": 5,
+    "first_rating_utc": "2000-04-25 23:05:32+00:00",
+    "last_rating_utc": "2003-02-28 17:49:50+00:00"
+  },
+  "split_policy": {
+    "method": "global_chronological",
+    "requested_ratios": [
+      0.8,
+      0.1,
+      0.1
+    ],
+    "train_inclusive_cutoff_timestamp": 975768738,
+    "validation_inclusive_cutoff_timestamp": 978133367,
+    "train_inclusive_cutoff_utc": "2000-12-02 14:52:18+00:00",
+    "validation_inclusive_cutoff_utc": "2000-12-29 23:42:47+00:00",
+    "timestamp_ties": "kept_together_in_earlier_split",
+    "seed": null
+  },
+  "split_statistics": [
+    {
+      "split": "train",
+      "rows": 800168,
+      "fraction": 0.8000007998328349,
+      "users": 5400,
+      "movies": 3662,
+      "positive_rows": 463021,
+      "first_utc": "2000-04-25 23:05:32+00:00",
+      "last_utc": "2000-12-02 14:52:18+00:00"
+    },
+    {
+      "split": "validation",
+      "rows": 100020,
+      "fraction": 0.0999991001880607,
+      "users": 1134,
+      "movies": 3305,
+      "positive_rows": 57808,
+      "first_utc": "2000-12-02 14:52:28+00:00",
+      "last_utc": "2000-12-29 23:42:47+00:00"
+    },
+    {
+      "split": "test",
+      "rows": 100021,
+      "fraction": 0.10000009997910436,
+      "users": 1209,
+      "movies": 3407,
+      "positive_rows": 54452,
+      "first_utc": "2000-12-29 23:43:34+00:00",
+      "last_utc": "2003-02-28 17:49:50+00:00"
+    }
+  ],
+  "relevance_threshold": 4,
+  "rating_scale": [
+    1,
+    5
+  ],
+  "normalization": "none; optional (rating-1)/4 is provided in the notebook",
+  "columns": {
+    "user_id": "int64 original ID",
+    "movie_id": "int64 original ID",
+    "rating": "int64, original 1..5",
+    "timestamp": "int64 Unix seconds UTC",
+    "rated_at": "ISO datetime UTC derived from timestamp",
+    "relevant": "int, rating>=4"
+  },
+  "evaluation": {
+    "k": 10,
+    "candidate_catalog": "all items observed in allowed history, minus user seen items",
+    "accuracy_users": "all heldout users with >=1 positive, including cold users",
+    "unreachable_positives": "retained in recall and IDCG denominators",
+    "validation_history": "train",
+    "test_history": "train+validation after model selection",
+    "popularity": "all historical interactions, including ratings below 4",
+    "genre_ild": "mean pairwise cosine distance on genre multi-hot vectors",
+    "novelty": "mean -log2(item_count / total_history_interactions), bits",
+    "arp": "mean item interaction count in history",
+    "static_evaluation": true,
+    "random_demo_seed": 2026
+  },
+  "validation_context": {
+    "n_users": 1134,
+    "n_history_users": 5400,
+    "n_catalog_items": 3662,
+    "n_history_interactions": 800168,
+    "n_heldout_interactions": 100020,
+    "n_positive_users": 1103,
+    "n_no_positive_users": 31,
+    "n_cold_users": 611,
+    "n_warm_users": 523,
+    "n_cold_items": 16,
+    "n_cold_item_interactions": 17,
+    "n_positive_interactions": 57808,
+    "n_unreachable_positive_interactions": 5,
+    "n_users_with_unreachable_positives": 5
+  },
+  "test_context": {
+    "n_users": 1209,
+    "n_history_users": 6011,
+    "n_catalog_items": 3678,
+    "n_history_interactions": 900188,
+    "n_heldout_interactions": 100021,
+    "n_positive_users": 1188,
+    "n_no_positive_users": 21,
+    "n_cold_users": 29,
+    "n_warm_users": 1180,
+    "n_cold_items": 28,
+    "n_cold_item_interactions": 90,
+    "n_positive_interactions": 54452,
+    "n_unreachable_positive_interactions": 45,
+    "n_users_with_unreachable_positives": 39
+  },
+  "runtime": {
+    "python": "3.12.10",
+    "numpy": "2.5.2"
+  },
+  "files_sha256": {
+    "movies_clean.csv": "f32cc1ee5daac3a8bc4e49825845da458bcfcd72272562c109c70476cfe6a727",
+    "source_metadata.json": "bb0f7dcd201e9b5ebf770f7168686b1b8355d6e29f55e2d172171a4501c7f26d",
+    "test.csv": "5605dcfb7735e6270df4b47d3badc17c513031b4a973680b4a0f30bac2be0987",
+    "train.csv": "8e76bb92374f57a92ba8338d680c125bc4152cf83e147de0dc6e8979134046ce",
+    "users_clean.csv": "5eacfb555ce20716a2c613a896ea86ff2d6e880f09dbe34cc6e430e0843b535b",
+    "users_onehot.csv": "0bd9c9f34f7ef13e884811d24caf5e8915e4eb7fe22ddd5c37dd5c8c2667687f",
+    "validation.csv": "cef8658c863c26aab07287bade6f3c369d32a006c7644c8f0ca9f3c5518a5158"
+  }
+}

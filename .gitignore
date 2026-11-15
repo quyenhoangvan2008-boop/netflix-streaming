@@ -1,0 +1,20 @@
+# Secrets & Credentials (NEVER COMMIT)
+.streamlit/secrets.toml
+.env
+.env.*
+*apikey*.txt
+*.key
+*.pem
+
+# Caches & Runtime
+.cache/
+__pycache__/
+*.py[cod]
+*.log
+*.jsonl
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
