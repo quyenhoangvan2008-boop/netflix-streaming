@@ -8,10 +8,22 @@ CineRecSys — Modern Netflix / YouTube Real-Time Recommender
 """
 
 import html
+import importlib
 import os
 from typing import Dict, List, Optional
 import streamlit as st
 import streamlit.components.v1 as components
+
+import core.engine as _core_engine
+
+# Ensure Streamlit Cloud hot-reloads pick up newly pulled submodules instead of stale sys.modules
+if not hasattr(_core_engine, "translate_genre_vi"):
+    import core.tmdb_client as _core_tmdb
+    import rerankers.gemini_reranker as _gemini_reranker
+
+    importlib.reload(_gemini_reranker)
+    importlib.reload(_core_tmdb)
+    importlib.reload(_core_engine)
 
 from core.engine import RecSysEngine, translate_genre_vi, translate_genres_vi
 from core.tmdb_client import TMDBClient
@@ -418,18 +430,18 @@ def _load_secrets() -> Dict:
 
 
 @st.cache_resource(show_spinner="Đang khởi tạo CineRecSys...")
-def get_engine() -> RecSysEngine:
+def get_engine(_v: int = 3) -> RecSysEngine:
     return RecSysEngine(BASE_DIR)
 
 
 @st.cache_resource
-def get_tmdb_client(read_token: str, api_key: str) -> TMDBClient:
+def get_tmdb_client(read_token: str, api_key: str, _v: int = 3) -> TMDBClient:
     return TMDBClient(read_token=read_token, api_key=api_key, cache_path=CACHE_PATH)
 
 
 secrets = _load_secrets()
-engine = get_engine()
-tmdb = get_tmdb_client(secrets["tmdb_read_token"], secrets["tmdb_api_key"])
+engine = get_engine(_v=3)
+tmdb = get_tmdb_client(secrets["tmdb_read_token"], secrets["tmdb_api_key"], _v=3)
 gemini_keys = secrets["gemini_keys"]
 
 
