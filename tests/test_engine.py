@@ -16,6 +16,7 @@ sys.path.insert(0, BASE_DIR)
 
 from core.engine import RecSysEngine
 from core.tmdb_client import TMDBClient
+from core.profile_store import build_cookie_sync_html, load_user_profile, save_user_profile, reset_user_profile
 
 
 class TestNetflixRecSys(unittest.TestCase):
@@ -75,6 +76,46 @@ class TestNetflixRecSys(unittest.TestCase):
         info = client.get_movie_details(1, tmdb_id="862", title="Toy Story (1995)")
         self.assertTrue(info.get("poster_url", "").startswith("https://image.tmdb.org"))
         self.assertTrue(info.get("youtube_url", "").startswith("https://www.youtube.com/watch?v="))
+
+    def test_realtime_stream_cold_and_active(self):
+        # 1. Pure cold-start -> Popularity
+        r_cold = self.engine.recommend_realtime_stream([], preferred_genres=[], current_movie_id=None, gemini_keys=None, top_k=12)
+        self.assertEqual(r_cold["engine"], "Popularity")
+        self.assertEqual(len(r_cold["items"]), 12)
+
+        # 2. Genre-only cold-start -> Genre + Popularity
+        r_genre = self.engine.recommend_realtime_stream([], preferred_genres=["Sci-Fi", "Action"], current_movie_id=None, gemini_keys=None, top_k=10)
+        self.assertEqual(r_genre["engine"], "Genre + Popularity")
+        self.assertEqual(len(r_genre["items"]), 10)
+
+        # 3. Watching a movie (The Matrix = 2571) shifts LightGCN recommendations dynamically
+        r_watch_1 = self.engine.recommend_realtime_stream([1], current_movie_id=2571, gemini_keys=None, top_k=10)
+        self.assertEqual(r_watch_1["engine"], "LightGCN")
+        ids_matrix = [it["movie_id"] for it in r_watch_1["items"]]
+        self.assertNotIn(2571, ids_matrix)
+        self.assertNotIn(1, ids_matrix)
+
+        # 4. Switching to Toy Story (1) shifts right-rail recommendations immediately
+        r_watch_2 = self.engine.recommend_realtime_stream([2571], current_movie_id=1, gemini_keys=None, top_k=10)
+        ids_toystory = [it["movie_id"] for it in r_watch_2["items"]]
+        self.assertNotEqual(ids_matrix, ids_toystory)
+
+    def test_profile_cookie_roundtrip(self):
+        import tempfile, urllib.parse, json
+        with tempfile.TemporaryDirectory() as tmpdir:
+            prof = {"uid": "test123", "onboarded": True, "skipped": False, "genres": ["Drama"], "watched": [2571, 318]}
+            save_user_profile(prof, tmpdir)
+            loaded = load_user_profile({"cinerecsys_uid": "test123"}, tmpdir)
+            self.assertTrue(loaded["onboarded"])
+            self.assertEqual(loaded["watched"], [2571, 318])
+            # Fallback from raw cookie without disk entry
+            raw_cookie = urllib.parse.quote(json.dumps(prof))
+            loaded2 = load_user_profile({"cinerecsys_profile": raw_cookie}, os.path.join(tmpdir, "empty"))
+            self.assertTrue(loaded2["onboarded"])
+            self.assertEqual(loaded2["genres"], ["Drama"])
+            fresh = reset_user_profile("test123", tmpdir)
+            self.assertFalse(fresh["onboarded"])
+            self.assertIn("max-age=0", build_cookie_sync_html(fresh, clear=True))
 
 
 if __name__ == "__main__":

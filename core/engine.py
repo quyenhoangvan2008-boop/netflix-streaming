@@ -63,7 +63,28 @@ VN_MOOD_BRIDGE = {
     "trinh thám": ("mystery detective investigation clue suspense", ["Mystery", "Crime"]),
     "chiến tranh": ("war soldier military battle history wwii vietnam", ["War", "Drama"]),
     "phiêu lưu": ("adventure journey quest expedition fantasy", ["Adventure", "Fantasy"]),
+    "cuốn hút": ("gripping captivating riveting thrilling intense engaging compelling masterpiece", ["Thriller", "Drama", "Sci-Fi", "Action"]),
+    "kịch tính": ("dramatic suspenseful intense tension gripping plot twist thriller", ["Thriller", "Drama", "Crime"]),
+    "gay cấn": ("thrilling intense suspenseful edge of seat action chase thriller", ["Thriller", "Action", "Crime"]),
+    "hồi hộp": ("suspenseful tense mystery thriller gripping twist", ["Thriller", "Mystery"]),
+    "hấp dẫn": ("engaging exciting fascinating entertaining blockbuster thriller adventure", ["Action", "Adventure", "Thriller"]),
+    "kinh điển": ("classic masterpiece acclaim iconic top rated cinema", ["Drama", "Crime", "Sci-Fi"]),
 }
+
+ONBOARDING_SHOWCASE_IDS: List[int] = [
+    2571,  # The Matrix (Action|Sci-Fi|Thriller)
+    318,   # The Shawshank Redemption (Drama)
+    1,     # Toy Story (Animation|Children's|Comedy)
+    593,   # The Silence of the Lambs (Drama|Thriller)
+    858,   # The Godfather (Action|Crime|Drama)
+    2028,  # Saving Private Ryan (Action|Drama|War)
+    480,   # Jurassic Park (Action|Adventure|Sci-Fi)
+    356,   # Forrest Gump (Comedy|Romance|War)
+    2762,  # The Sixth Sense (Thriller)
+    1265,  # Groundhog Day (Comedy|Romance)
+    1214,  # Alien (Action|Horror|Sci-Fi|Thriller)
+    2396,  # Shakespeare in Love (Comedy|Romance)
+]
 
 
 def _cosine_genre_ild(item_ids: List[int], genre_matrix: np.ndarray) -> float:
@@ -113,12 +134,14 @@ class RecSysEngine:
         self._fit_classical_models()
         self._load_deep_checkpoints()
         self._build_search_index()
+        self._rt_cache: Dict[Tuple, Dict] = {}
 
     def _fit_classical_models(self):
         self.popularity = PopularityRecommender(num_items=self.num_items)
         self.popularity.fit(self.train_val_df)
 
-        self.genre_matrix, _ = ContentBasedGenreRecommender.build_genre_matrix(self.movies_df, self.num_items)
+        self.genre_matrix, self.genre_names = ContentBasedGenreRecommender.build_genre_matrix(self.movies_df, self.num_items)
+        self.genre_to_idx = {str(g): i for i, g in enumerate(self.genre_names)}
         norms = np.linalg.norm(self.genre_matrix, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         self.genre_norm_matrix = (self.genre_matrix / norms).astype(np.float32)
@@ -656,3 +679,174 @@ class RecSysEngine:
             "items": items_out,
             "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1),
         }
+
+    # ------------------------------------------------------------------
+    # 4. Streamlined Cookie + Real-Time Watch Page (LightGCN -> Fast LLM)
+    # ------------------------------------------------------------------
+    def get_onboarding_showcase(self) -> List[Dict]:
+        items = []
+        for mid in ONBOARDING_SHOWCASE_IDS:
+            if mid in self.metadata:
+                items.append(dict(self.metadata[mid]))
+        return items
+
+    def recommend_realtime_stream(
+        self,
+        watched_movie_ids: List[int],
+        preferred_genres: Optional[List[str]] = None,
+        current_movie_id: Optional[int] = None,
+        gemini_keys: Optional[List[str]] = None,
+        top_k: int = 12,
+    ) -> Dict:
+        """
+        Real-time recommender for Home & Watch views:
+        - Cold-start (no watched, no genres, no current movie) -> Popularity
+        - Genre-only cold-start -> Genre match weighted by Popularity + fast LLM rerank
+        - Active / Returning user (history or currently watching) -> Pretrained LightGCN
+          inductive graph propagation (zero retraining) + fast-timeout Gemini 3.5 Flash-Lite
+          rerank (cleanly skips back to LightGCN if Gemini is slow or unavailable).
+        """
+        t0 = time.perf_counter()
+        genres = [str(g) for g in (preferred_genres or []) if g in self.genre_to_idx]
+        clean_watched = [int(m) for m in watched_movie_ids if 1 <= int(m) <= self.num_items]
+
+        seen_set: Set[int] = set(clean_watched)
+        if current_movie_id and 1 <= int(current_movie_id) <= self.num_items:
+            seen_set.add(int(current_movie_id))
+
+        cache_key = (
+            tuple(clean_watched[-10:]),
+            int(current_movie_id) if current_movie_id else None,
+            tuple(sorted(genres)),
+            int(top_k),
+            bool(gemini_keys),
+        )
+        if cache_key in self._rt_cache:
+            return self._rt_cache[cache_key]
+
+        # Genre preference boost vector across all catalog movies
+        genre_boost_np = np.zeros(self.num_items, dtype=np.float32)
+        if genres:
+            g_vec = np.zeros(self.genre_matrix.shape[1], dtype=np.float32)
+            for g in genres:
+                g_vec[self.genre_to_idx[g]] = 1.0
+            norm = float(np.linalg.norm(g_vec))
+            if norm > 0:
+                g_vec /= norm
+            genre_boost_np = (self.genre_norm_matrix[1 : self.num_items + 1] @ g_vec).astype(np.float32)
+
+        # Stage-1 retrieval
+        has_seeds = bool(clean_watched) or (current_movie_id is not None and 1 <= int(current_movie_id) <= self.num_items)
+        if not has_seeds and not genres:
+            s1_pairs = self._rank_from_array(self.popularity.item_counts.copy(), seen_set, top_k=top_k)
+            rec_items = []
+            for rank, (mid, sc) in enumerate(s1_pairs, 1):
+                m = dict(self.metadata.get(mid, {"movie_id": mid, "display_title": f"Movie {mid}", "categories": []}))
+                m["rank"] = rank
+                m["score"] = round(float(sc), 4)
+                rec_items.append(m)
+            out = {
+                "items": rec_items,
+                "engine": "Popularity",
+                "reranked": False,
+                "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+            }
+            self._rt_cache[cache_key] = out
+            return out
+
+        if not has_seeds and genres:
+            pop_arr = self.popularity.item_counts[1 : self.num_items + 1].astype(np.float32)
+            pop_norm = pop_arr / (float(pop_arr.max()) + 1e-6)
+            combined = 2.0 * genre_boost_np + 0.65 * pop_norm
+            score_full = np.zeros(self.num_items + 1, dtype=np.float32)
+            score_full[1 : self.num_items + 1] = combined
+            s1_pairs = self._rank_from_array(score_full, seen_set, top_k=24)
+            stage1_name = "Genre + Popularity"
+        else:
+            # Inductive graph embedding propagation using pretrained LightGCN weights (no retraining)
+            with torch.no_grad():
+                emb_parts = []
+                weights = []
+                # Recent watch history (recency-weighted)
+                recent_tail = [m for m in clean_watched[-12:] if m != current_movie_id]
+                for idx_pos, mid in enumerate(recent_tail):
+                    emb_parts.append(self.gcn_i_emb[mid - 1])
+                    weights.append(0.65 + 0.08 * idx_pos)
+                # Currently playing movie drives strong real-time context shift
+                if current_movie_id and 1 <= int(current_movie_id) <= self.num_items:
+                    emb_parts.append(self.gcn_i_emb[int(current_movie_id) - 1])
+                    weights.append(2.2)
+
+                w_t = torch.tensor(weights, dtype=torch.float32, device=self.device).unsqueeze(1)
+                stacked = torch.stack(emb_parts, dim=0)
+                u_vec = (stacked * w_t).sum(dim=0) / w_t.sum()
+
+                scores_t = torch.matmul(self.gcn_i_emb, u_vec).clone()
+                if genres:
+                    scores_t = scores_t + 0.20 * torch.from_numpy(genre_boost_np).to(self.device)
+                scores_t[~self.valid_mask_t] = -1e9
+                seen_idx = [s - 1 for s in seen_set if 1 <= s <= self.num_items]
+                if seen_idx:
+                    scores_t[seen_idx] = -1e9
+                top_vals, top_idx = torch.topk(scores_t, k=24)
+                s1_pairs = [(int(i + 1), float(v)) for i, v in zip(top_idx.cpu().tolist(), top_vals.cpu().tolist())]
+            stage1_name = "LightGCN"
+
+        # Fast Stage-2 Gemini 3.5 Flash-Lite Rerank -> strict fast fallback to Stage-1 if slow/error
+        ranked_pairs = s1_pairs[:top_k]
+        engine_label = stage1_name
+        reranked = False
+
+        if gemini_keys and len(s1_pairs) >= top_k:
+            cand_items = []
+            for mid, sc in s1_pairs:
+                m = dict(self.metadata.get(mid, {"movie_id": mid, "display_title": f"Movie {mid}", "categories": []}))
+                m["score"] = sc
+                cand_items.append(m)
+
+            hist_titles = []
+            if current_movie_id and current_movie_id in self.metadata:
+                hist_titles.append(f"[Đang xem] {self.metadata[current_movie_id]['display_title']}")
+            for m in clean_watched[-8:]:
+                if m != current_movie_id and m in self.metadata:
+                    hist_titles.append(self.metadata[m]["display_title"])
+            if not hist_titles and genres:
+                hist_titles = [f"Yêu thích thể loại: {', '.join(genres)}"]
+
+            try:
+                res = rerank_with_gemini_calibrated(
+                    api_keys=gemini_keys,
+                    history_titles=hist_titles,
+                    cand_items=cand_items,
+                    retriever_name=stage1_name,
+                    top_n=top_k,
+                    alpha_fuse=0.30,
+                    timeout_ms=3200,
+                    max_wall_seconds=3.8,
+                )
+                sc_map = dict(s1_pairs)
+                ranked_pairs = [(mid, sc_map.get(mid, 0.0)) for mid in res["ranked_ids"]]
+                engine_label = f"{stage1_name} + Gemini 3.5 Flash-Lite"
+                reranked = True
+            except Exception:
+                ranked_pairs = s1_pairs[:top_k]
+                engine_label = stage1_name
+                reranked = False
+
+        rec_items = []
+        for rank, (mid, sc) in enumerate(ranked_pairs[:top_k], 1):
+            m = dict(self.metadata.get(mid, {"movie_id": mid, "display_title": f"Movie {mid}", "categories": []}))
+            m["rank"] = rank
+            m["score"] = round(float(sc), 4)
+            rec_items.append(m)
+
+        out = {
+            "items": rec_items,
+            "engine": engine_label,
+            "reranked": reranked,
+            "latency_ms": round((time.perf_counter() - t0) * 1000.0, 1),
+        }
+        if len(self._rt_cache) > 64:
+            self._rt_cache.clear()
+        self._rt_cache[cache_key] = out
+        return out

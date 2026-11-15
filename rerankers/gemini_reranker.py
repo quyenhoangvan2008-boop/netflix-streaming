@@ -32,19 +32,34 @@ class KeyRotator:
             return k
 
 
-def _call_gemini_json(api_keys: List[str], prompt: str, temperature: float = 0.15) -> Tuple[Dict, int]:
+def _call_gemini_json(
+    api_keys: List[str],
+    prompt: str,
+    temperature: float = 0.15,
+    timeout_ms: int = 4000,
+    max_attempts: int = 3,
+    max_wall_seconds: float = 5.0,
+) -> Tuple[Dict, int]:
     from google import genai
+    from google.genai import types
 
     rotator = KeyRotator(api_keys)
     if rotator.count == 0:
         raise ValueError("Chưa cấu hình Gemini API Key.")
 
     last_err = None
-    attempts = min(max(3, rotator.count * 2), 8)
+    attempt = 0
+    attempts = max(1, min(max_attempts, rotator.count * 2))
+    deadline = time.perf_counter() + max_wall_seconds
     for attempt in range(attempts):
+        if time.perf_counter() >= deadline:
+            break
         key = rotator.next_key()
         try:
-            client = genai.Client(api_key=key)
+            client = genai.Client(
+                api_key=key,
+                http_options=types.HttpOptions(timeout=timeout_ms),
+            )
             resp = client.models.generate_content(
                 model=GEMINI_MODEL_NAME,
                 contents=prompt,
@@ -60,8 +75,10 @@ def _call_gemini_json(api_keys: List[str], prompt: str, temperature: float = 0.1
             return parsed, attempt + 1
         except Exception as exc:
             last_err = exc
-            time.sleep(min(2.0, 0.35 * (attempt + 1)))
-    raise RuntimeError(f"Gemini API error after {attempts} attempts: {last_err}")
+            if time.perf_counter() + 0.3 >= deadline:
+                break
+            time.sleep(0.25)
+    raise RuntimeError(f"Gemini API error/timeout after {attempt + 1} attempt(s): {last_err}")
 
 
 def build_rerank_prompt(
@@ -98,11 +115,20 @@ def rerank_with_gemini_calibrated(
     retriever_name: str = "LightGCN",
     top_n: int = 10,
     alpha_fuse: float = 0.30,
+    timeout_ms: int = 3500,
+    max_wall_seconds: float = 4.2,
 ) -> Dict:
     valid_ids: Set[int] = {int(c["movie_id"]) for c in cand_items}
     prompt = build_rerank_prompt(history_titles, cand_items, retriever_name, top_n=top_n)
     t0 = time.perf_counter()
-    data, tries = _call_gemini_json(api_keys, prompt, temperature=0.15)
+    data, tries = _call_gemini_json(
+        api_keys,
+        prompt,
+        temperature=0.15,
+        timeout_ms=timeout_ms,
+        max_attempts=2,
+        max_wall_seconds=max_wall_seconds,
+    )
     latency_ms = (time.perf_counter() - t0) * 1000.0
 
     if isinstance(data, list):
@@ -199,7 +225,14 @@ def agent_curate_movies(
     )
 
     t0 = time.perf_counter()
-    data, _ = _call_gemini_json(api_keys, prompt, temperature=0.25)
+    data, _ = _call_gemini_json(
+        api_keys,
+        prompt,
+        temperature=0.25,
+        timeout_ms=5000,
+        max_attempts=2,
+        max_wall_seconds=6.0,
+    )
     latency_ms = (time.perf_counter() - t0) * 1000.0
 
     if isinstance(data, list) and data and isinstance(data[0], dict):
