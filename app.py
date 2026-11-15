@@ -15,24 +15,41 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import core.engine as _core_engine
+import core.profile_store as _core_profile_store
 
 # Ensure Streamlit Cloud hot-reloads pick up newly pulled submodules instead of stale sys.modules
-if not hasattr(_core_engine, "translate_genre_vi"):
+if not hasattr(_core_engine, "translate_genre_vi") or not hasattr(_core_profile_store, "STORAGE_V2_JS"):
     import core.tmdb_client as _core_tmdb
     import rerankers.gemini_reranker as _gemini_reranker
 
     importlib.reload(_gemini_reranker)
     importlib.reload(_core_tmdb)
     importlib.reload(_core_engine)
+    importlib.reload(_core_profile_store)
 
 from core.engine import RecSysEngine, translate_genre_vi, translate_genres_vi
 from core.tmdb_client import TMDBClient
 from core.profile_store import (
     ONBOARDING_GENRES,
+    STORAGE_V2_JS,
     build_cookie_sync_html,
+    compact_profile_json,
     load_user_profile,
+    parse_compact_profile_json,
     reset_user_profile,
     save_user_profile,
+)
+
+_HAS_V2 = hasattr(st, "components") and hasattr(st.components, "v2")
+_STORAGE_COMPONENT = (
+    st.components.v2.component(
+        "cinerecsys_storage",
+        html="",
+        css=":host { display: none !important; }",
+        js=STORAGE_V2_JS,
+    )
+    if _HAS_V2
+    else None
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -451,8 +468,15 @@ gemini_keys = secrets["gemini_keys"]
 def _init_session_profile():
     if "profile" not in st.session_state:
         cookies_dict = dict(st.context.cookies) if hasattr(st, "context") and hasattr(st.context, "cookies") else {}
-        st.session_state.profile = load_user_profile(cookies_dict, CACHE_DIR)
-        st.session_state._sync_cookie = True
+        loaded = load_user_profile(cookies_dict, CACHE_DIR)
+        st.session_state.profile = loaded
+        st.session_state.setdefault("_storage_seq", 1)
+        if loaded.get("onboarded"):
+            st.session_state._sync_cookie = True
+            st.session_state._hydrated_from_client = True
+        else:
+            st.session_state._sync_cookie = False
+            st.session_state._hydrated_from_client = False
     st.session_state.setdefault("view", "home")
     st.session_state.setdefault("watch_movie_id", None)
     st.session_state.setdefault("search_query", "")
@@ -466,8 +490,10 @@ def _init_session_profile():
 def _persist_profile(profile: Dict):
     st.session_state.profile = profile
     save_user_profile(profile, CACHE_DIR)
+    st.session_state._storage_seq = int(st.session_state.get("_storage_seq", 0)) + 1
     st.session_state._sync_cookie = True
     st.session_state._clear_cookie = False
+    st.session_state._hydrated_from_client = True
 
 
 def _on_dismiss_onboarding():
@@ -611,8 +637,10 @@ def _render_top_bar():
             st.session_state.ob_selected_movies = []
             st.session_state.ob_selected_genres = []
             st.session_state.ob_movie_dropdown = []
+            st.session_state._storage_seq = int(st.session_state.get("_storage_seq", 0)) + 1
             st.session_state._sync_cookie = False
             st.session_state._clear_cookie = True
+            st.session_state._hydrated_from_client = True
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -913,9 +941,43 @@ def _render_watch():
 
 
 # ------------------------------------------------------------------
-# Main Dispatch & Browser Cookie Sync
+# Main Dispatch & Browser Cookie + LocalStorage Sync
 # ------------------------------------------------------------------
+def _sync_browser_storage():
+    profile = st.session_state.profile
+    seq = int(st.session_state.get("_storage_seq", 1))
+    clear_flag = st.session_state.pop("_clear_cookie", False)
+    sync_flag = st.session_state.pop("_sync_cookie", False)
+
+    if clear_flag:
+        payload = {"action": "clear", "seq": seq}
+    elif sync_flag:
+        payload = {
+            "action": "save",
+            "uid": str(profile.get("uid", "")),
+            "profile_json": compact_profile_json(profile),
+            "seq": seq,
+        }
+    elif not profile.get("onboarded") and not st.session_state.get("_hydrated_from_client", False):
+        payload = {"action": "hydrate"}
+    else:
+        payload = {"action": "idle"}
+
+    if _STORAGE_COMPONENT is not None:
+        res = _STORAGE_COMPONENT(key="cinerecsys_storage", data=payload, on_restored_change=lambda: None)
+        restored_raw = getattr(res, "restored", None) if res is not None else None
+        if restored_raw and not st.session_state.profile.get("onboarded") and not st.session_state.get("_hydrated_from_client", False):
+            parsed = parse_compact_profile_json(restored_raw)
+            if parsed and parsed.get("onboarded"):
+                st.session_state.profile = parsed
+                save_user_profile(parsed, CACHE_DIR)
+            st.session_state._hydrated_from_client = True
+    elif clear_flag or sync_flag:
+        st.html(build_cookie_sync_html(profile, clear=clear_flag), unsafe_allow_javascript=True)
+
+
 _init_session_profile()
+_sync_browser_storage()
 
 if not st.session_state.profile.get("onboarded"):
     _render_home(interactive=False)
@@ -924,8 +986,3 @@ elif st.session_state.get("view") == "watch" and st.session_state.get("watch_mov
     _render_watch()
 else:
     _render_home(interactive=True)
-
-if st.session_state.pop("_clear_cookie", False):
-    components.html(build_cookie_sync_html(st.session_state.profile, clear=True), height=0)
-elif st.session_state.pop("_sync_cookie", False):
-    components.html(build_cookie_sync_html(st.session_state.profile, clear=False), height=0)

@@ -97,13 +97,13 @@ class TestNetflixRecSys(unittest.TestCase):
         # 3. Watching a movie (The Matrix = 2571) shifts LightGCN recommendations dynamically
         r_watch_1 = self.engine.recommend_realtime_stream([1], current_movie_id=2571, gemini_keys=None, top_k=10, use_llm=False)
         self.assertEqual(r_watch_1["engine"], "LightGCN")
-        self.assertLess(r_watch_1["latency_ms"], 100.0)
         ids_matrix = [it["movie_id"] for it in r_watch_1["items"]]
         self.assertNotIn(2571, ids_matrix)
         self.assertNotIn(1, ids_matrix)
 
-        # 4. Switching to Toy Story (1) shifts right-rail recommendations immediately
-        r_watch_2 = self.engine.recommend_realtime_stream([2571], current_movie_id=1, gemini_keys=None, top_k=10)
+        # 4. Switching to Toy Story (1) shifts right-rail recommendations immediately (warm LightGCN latency < 50ms)
+        r_watch_2 = self.engine.recommend_realtime_stream([2571], current_movie_id=1, gemini_keys=None, top_k=10, use_llm=False)
+        self.assertLess(r_watch_2["latency_ms"], 50.0)
         ids_toystory = [it["movie_id"] for it in r_watch_2["items"]]
         self.assertNotEqual(ids_matrix, ids_toystory)
 
